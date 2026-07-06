@@ -206,7 +206,147 @@ wss.on('connection', (ws, req) => {
     // Обновляем количество онлайн для всех
     broadcastOnlineCount();
 });
+// --- НАСТРОЙКИ ---
+const remoteAudio = document.createElement('audio');
+remoteAudio.autoplay = true;
 
+let localStream = null;
+let peerConnection = null;
+const configuration = {
+    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] // STUN-сервер для обхода NAT
+};
+
+// --- ЭЛЕМЕНТЫ UI ---
+const joinVoiceBtn = document.getElementById('joinVoiceBtn');
+const leaveVoiceBtn = document.getElementById('leaveVoiceBtn');
+const voiceStatus = document.getElementById('voiceStatus');
+
+let currentRoomId = null;
+
+// --- ФУНКЦИИ ---
+
+// 1. Вход в голосовую комнату
+async function joinVoiceRoom(roomId) {
+    try {
+        // Запрашиваем доступ к микрофону
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        voiceStatus.textContent = 'Статус: Получен доступ к микрофону';
+
+        // Создаём PeerConnection
+        peerConnection = new RTCPeerConnection(configuration);
+        localStream.getTracks().forEach(track => {
+            peerConnection.addTrack(track, localStream);
+        });
+
+        // Обработчик входящего потока (звук собеседника)
+        peerConnection.ontrack = (event) => {
+            if (remoteAudio.srcObject !== event.streams[0]) {
+                remoteAudio.srcObject = event.streams[0];
+                voiceStatus.textContent = 'Статус: В голосовом чате';
+            }
+        };
+
+        // Обработчик ICE-кандидатов
+        peerConnection.onicecandidate = (event) => {
+            if (event.candidate) {
+                socket.emit('voice-signal', {
+                    to: roomId, // шлём всем в комнате
+                    signal: { type: 'candidate', candidate: event.candidate }
+                });
+            }
+        };
+
+        // Создаём offer (приглашение)
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+
+        // Отправляем offer всем в комнате
+        socket.emit('voice-signal', {
+            to: roomId,
+            signal: { type: 'offer', sdp: offer }
+        });
+
+        // Сохраняем ID комнаты
+        currentRoomId = roomId;
+        // Присоединяемся к комнате на сервере
+        socket.emit('join-voice-room', roomId);
+
+        // Меняем UI
+        joinVoiceBtn.style.display = 'none';
+        leaveVoiceBtn.style.display = 'inline-block';
+        voiceStatus.textContent = 'Статус: Подключение...';
+
+    } catch (error) {
+        console.error('Ошибка при входе в голосовой чат:', error);
+        voiceStatus.textContent = '❌ Ошибка: ' + error.message;
+    }
+}
+
+// 2. Выход из голосовой комнаты
+function leaveVoiceRoom() {
+    if (peerConnection) {
+        peerConnection.close();
+        peerConnection = null;
+    }
+    if (localStream) {
+        localStream.getTracks().forEach(track => track.stop());
+        localStream = null;
+    }
+    if (remoteAudio.srcObject) {
+        remoteAudio.srcObject = null;
+    }
+    if (currentRoomId) {
+        socket.emit('leave-voice-room', currentRoomId);
+        currentRoomId = null;
+    }
+
+    // Меняем UI
+    joinVoiceBtn.style.display = 'inline-block';
+    leaveVoiceBtn.style.display = 'none';
+    voiceStatus.textContent = 'Статус: Не в сети';
+}
+
+// 3. Обработка входящих сигналов WebRTC
+socket.on('voice-signal', async ({ from, signal }) => {
+    if (!peerConnection) return;
+
+    try {
+        if (signal.type === 'offer') {
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+            const answer = await peerConnection.createAnswer();
+            await peerConnection.setLocalDescription(answer);
+            socket.emit('voice-signal', {
+                to: from,
+                signal: { type: 'answer', sdp: answer }
+            });
+        } else if (signal.type === 'answer') {
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+        } else if (signal.type === 'candidate') {
+            await peerConnection.addIceCandidate(new RTCIceCandidate(signal.candidate));
+        }
+    } catch (error) {
+        console.error('Ошибка обработки сигнала:', error);
+    }
+});
+
+// 4. Обработка событий от сервера (для UI)
+socket.on('user-joined-voice', (userId) => {
+    voiceStatus.textContent = `Статус: В чате (${userId})`;
+});
+
+socket.on('user-left-voice', (userId) => {
+    voiceStatus.textContent = `Статус: В чате (тихо)`;
+});
+
+// --- НАЗНАЧАЕМ ОБРАБОТЧИКИ КНОПОК ---
+joinVoiceBtn.addEventListener('click', () => {
+    const roomId = prompt('Введите ID комнаты (или оставьте пустым для создания новой):');
+    if (roomId === null) return; // пользователь отменил
+    const finalRoomId = roomId.trim() || `room-${Date.now()}`;
+    joinVoiceRoom(finalRoomId);
+});
+
+leaveVoiceBtn.addEventListener('click', leaveVoiceRoom);
 // Запуск сервера
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
