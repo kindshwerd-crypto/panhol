@@ -1,13 +1,12 @@
 const express = require('express');
 const http = require('http');
-const WebSocket = require('ws');
+const { Server } = require('socket.io');
 const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const io = new Server(server);
 
-// Раздаём статические файлы из папки public
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Хранилище сообщений (в памяти сервера)
@@ -15,81 +14,38 @@ let messages = [];
 const MAX_MESSAGES = 200;
 
 // Хранилище подключённых пользователей
-const clients = new Map(); // key: ws, value: { username, id }
+const clients = new Map();
 
 // Генерация уникального ID
 function generateId() {
     return Date.now() + '-' + Math.random().toString(36).substr(2, 9);
 }
+
 // --- ГОЛОСОВОЙ ЧАТ (WebRTC) ---
-// Хранилище комнат: { roomId: [socketId, socketId, ...] }
 const rooms = {};
 
-// 1. Присоединиться к голосовой комнате
-socket.on('join-voice-room', (roomId) => {
-    if (!rooms[roomId]) rooms[roomId] = [];
-    if (!rooms[roomId].includes(socket.id)) {
-        rooms[roomId].push(socket.id);
-    }
-    socket.join(roomId);
-    // Уведомляем всех в комнате, что пришёл новый пользователь
-    io.to(roomId).emit('user-joined-voice', socket.id);
-    console.log(`User ${socket.id} joined voice room: ${roomId}`);
-});
-
-// 2. Покинуть голосовую комнату
-socket.on('leave-voice-room', (roomId) => {
-    if (rooms[roomId]) {
-        rooms[roomId] = rooms[roomId].filter(id => id !== socket.id);
-        if (rooms[roomId].length === 0) delete rooms[roomId];
-    }
-    socket.leave(roomId);
-    io.to(roomId).emit('user-left-voice', socket.id);
-    console.log(`User ${socket.id} left voice room: ${roomId}`);
-});
-
-// 3. Пересылка сигналов WebRTC (offer, answer, ICE-candidate)
-socket.on('voice-signal', ({ to, signal }) => {
-    // 'to' — это socket.id получателя
-    io.to(to).emit('voice-signal', { from: socket.id, signal });
-});
 // Подсчёт онлайн пользователей
 function getOnlineCount() {
     let count = 0;
-    wss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
-            count++;
-        }
-    });
+    // В Socket.IO используем io.sockets.sockets
+    io.sockets.sockets.forEach(() => count++);
     return count;
 }
 
 // Отправка сообщения всем клиентам
 function broadcast(data, excludeClient = null) {
-    wss.clients.forEach(client => {
-        if (client !== excludeClient && client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify(data));
-        }
-    });
+    io.emit('new_message', data);
 }
 
 // Отправка истории новому пользователю
 function sendHistory(client) {
-    if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({
-            type: 'history',
-            messages: messages
-        }));
-    }
+    client.emit('history', { messages });
 }
 
 // Отправка количества онлайн всем
 function broadcastOnlineCount() {
     const count = getOnlineCount();
-    broadcast({
-        type: 'online_count',
-        count: count
-    });
+    io.emit('online_count', { count });
 }
 
 // Добавление нового сообщения в историю
@@ -101,267 +57,66 @@ function addMessage(username, text, isSystem = false) {
         timestamp: Date.now(),
         isSystem: isSystem
     };
-    
     messages.push(message);
-    
-    // Ограничиваем количество хранимых сообщений
     if (messages.length > MAX_MESSAGES) {
         messages = messages.slice(-MAX_MESSAGES);
     }
-    
-    // Рассылаем сообщение всем клиентам
-    broadcast({
-        type: 'new_message',
-        message: message
-    });
-    
+    broadcast({ type: 'new_message', message });
     return message;
 }
 
-// Обработка WebSocket соединений
-wss.on('connection', (ws, req) => {
-    const clientId = generateId();
-    let username = 'Гость';
-    const clientIp = req.socket.remoteAddress;
-    
-    console.log(`🔌 Новое подключение: ${clientId} (${clientIp})`);
-    
-    // Отправляем приветствие
-    ws.send(JSON.stringify({
-        type: 'connected',
-        message: 'Добро пожаловать в Pанхол Мессенджер!',
-        clientId: clientId
-    }));
-    
-    // Отправляем историю сообщений
-    sendHistory(ws);
-    
-    // Отправляем текущее количество онлайн
-    ws.send(JSON.stringify({
-        type: 'online_count',
-        count: getOnlineCount()
-    }));
-    
-    // Обработка сообщений от клиента
-    ws.on('message', (data) => {
-        try {
-            const parsed = JSON.parse(data);
-            
-            switch (parsed.type) {
-                case 'set_username':
-                    const oldUsername = username;
-                    username = parsed.username.substring(0, 30) || 'Гость';
-                    
-                    // Сохраняем информацию о клиенте
-                    clients.set(ws, { username, id: clientId });
-                    
-                    // Системное сообщение о смене имени
-                    if (oldUsername !== username && oldUsername !== 'Гость') {
-                        addMessage('Система', `${oldUsername} сменил имя на ${username}`, true);
-                    } else if (oldUsername === 'Гость' && username !== 'Гость') {
-                        addMessage('Система', `${username} присоединился к чату`, true);
-                    }
-                    
-                    console.log(`📝 Пользователь ${clientId} установил имя: ${username}`);
-                    break;
-                    
-                case 'message':
-                    if (parsed.text && parsed.text.trim()) {
-                        addMessage(username, parsed.text.trim(), false);
-                        console.log(`💬 ${username}: ${parsed.text.trim()}`);
-                    }
-                    break;
-                    
-                default:
-                    console.log('Неизвестный тип сообщения:', parsed.type);
-            }
-        } catch (error) {
-            console.error('Ошибка обработки сообщения:', error);
+// Обработка Socket.IO соединений
+io.on('connection', (socket) => {
+    console.log('New client connected:', socket.id);
+
+    // Отправляем историю
+    sendHistory(socket);
+
+    // --- ГОЛОСОВОЙ ЧАТ ---
+    socket.on('join-voice-room', (roomId) => {
+        if (!rooms[roomId]) rooms[roomId] = [];
+        if (!rooms[roomId].includes(socket.id)) {
+            rooms[roomId].push(socket.id);
+        }
+        socket.join(roomId);
+        io.to(roomId).emit('user-joined-voice', socket.id);
+        console.log(`User ${socket.id} joined voice room: ${roomId}`);
+    });
+
+    socket.on('leave-voice-room', (roomId) => {
+        if (rooms[roomId]) {
+            rooms[roomId] = rooms[roomId].filter(id => id !== socket.id);
+            if (rooms[roomId].length === 0) delete rooms[roomId];
+        }
+        socket.leave(roomId);
+        io.to(roomId).emit('user-left-voice', socket.id);
+        console.log(`User ${socket.id} left voice room: ${roomId}`);
+    });
+
+    socket.on('voice-signal', ({ to, signal }) => {
+        io.to(to).emit('voice-signal', { from: socket.id, signal });
+    });
+
+    // --- Обычные сообщения ---
+    socket.on('send_message', (data) => {
+        const { username, text } = data;
+        if (text && text.trim()) {
+            addMessage(username || 'Аноним', text.trim(), false);
         }
     });
-    
-    // Обработка отключения
-    ws.on('close', () => {
-        console.log(`👋 Пользователь отключился: ${username} (${clientId})`);
-        clients.delete(ws);
-        
-        // Системное сообщение о выходе (только если пользователь успел представиться)
-        if (username !== 'Гость') {
-            broadcast({
-                type: 'new_message',
-                message: {
-                    id: generateId(),
-                    username: 'Система',
-                    text: `${username} покинул чат`,
-                    timestamp: Date.now(),
-                    isSystem: true
-                }
-            });
+
+    socket.on('disconnect', () => {
+        console.log('Client disconnected:', socket.id);
+        // Удаляем из всех голосовых комнат
+        for (const roomId in rooms) {
+            rooms[roomId] = rooms[roomId].filter(id => id !== socket.id);
+            if (rooms[roomId].length === 0) delete rooms[roomId];
         }
-        
-        // Обновляем количество онлайн
         broadcastOnlineCount();
     });
-    
-    // Обновляем количество онлайн для всех
-    broadcastOnlineCount();
-});
-// --- НАСТРОЙКИ ---
-const remoteAudio = document.createElement('audio');
-remoteAudio.autoplay = true;
-
-let localStream = null;
-let peerConnection = null;
-const configuration = {
-    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] // STUN-сервер для обхода NAT
-};
-
-// --- ЭЛЕМЕНТЫ UI ---
-const joinVoiceBtn = document.getElementById('joinVoiceBtn');
-const leaveVoiceBtn = document.getElementById('leaveVoiceBtn');
-const voiceStatus = document.getElementById('voiceStatus');
-
-let currentRoomId = null;
-
-// --- ФУНКЦИИ ---
-
-// 1. Вход в голосовую комнату
-async function joinVoiceRoom(roomId) {
-    try {
-        // Запрашиваем доступ к микрофону
-        localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        voiceStatus.textContent = 'Статус: Получен доступ к микрофону';
-
-        // Создаём PeerConnection
-        peerConnection = new RTCPeerConnection(configuration);
-        localStream.getTracks().forEach(track => {
-            peerConnection.addTrack(track, localStream);
-        });
-
-        // Обработчик входящего потока (звук собеседника)
-        peerConnection.ontrack = (event) => {
-            if (remoteAudio.srcObject !== event.streams[0]) {
-                remoteAudio.srcObject = event.streams[0];
-                voiceStatus.textContent = 'Статус: В голосовом чате';
-            }
-        };
-
-        // Обработчик ICE-кандидатов
-        peerConnection.onicecandidate = (event) => {
-            if (event.candidate) {
-                socket.emit('voice-signal', {
-                    to: roomId, // шлём всем в комнате
-                    signal: { type: 'candidate', candidate: event.candidate }
-                });
-            }
-        };
-
-        // Создаём offer (приглашение)
-        const offer = await peerConnection.createOffer();
-        await peerConnection.setLocalDescription(offer);
-
-        // Отправляем offer всем в комнате
-        socket.emit('voice-signal', {
-            to: roomId,
-            signal: { type: 'offer', sdp: offer }
-        });
-
-        // Сохраняем ID комнаты
-        currentRoomId = roomId;
-        // Присоединяемся к комнате на сервере
-        socket.emit('join-voice-room', roomId);
-
-        // Меняем UI
-        joinVoiceBtn.style.display = 'none';
-        leaveVoiceBtn.style.display = 'inline-block';
-        voiceStatus.textContent = 'Статус: Подключение...';
-
-    } catch (error) {
-        console.error('Ошибка при входе в голосовой чат:', error);
-        voiceStatus.textContent = '❌ Ошибка: ' + error.message;
-    }
-}
-
-// 2. Выход из голосовой комнаты
-function leaveVoiceRoom() {
-    if (peerConnection) {
-        peerConnection.close();
-        peerConnection = null;
-    }
-    if (localStream) {
-        localStream.getTracks().forEach(track => track.stop());
-        localStream = null;
-    }
-    if (remoteAudio.srcObject) {
-        remoteAudio.srcObject = null;
-    }
-    if (currentRoomId) {
-        socket.emit('leave-voice-room', currentRoomId);
-        currentRoomId = null;
-    }
-
-    // Меняем UI
-    joinVoiceBtn.style.display = 'inline-block';
-    leaveVoiceBtn.style.display = 'none';
-    voiceStatus.textContent = 'Статус: Не в сети';
-}
-
-// 3. Обработка входящих сигналов WebRTC
-socket.on('voice-signal', async ({ from, signal }) => {
-    if (!peerConnection) return;
-
-    try {
-        if (signal.type === 'offer') {
-            await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.sdp));
-            const answer = await peerConnection.createAnswer();
-            await peerConnection.setLocalDescription(answer);
-            socket.emit('voice-signal', {
-                to: from,
-                signal: { type: 'answer', sdp: answer }
-            });
-        } else if (signal.type === 'answer') {
-            await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.sdp));
-        } else if (signal.type === 'candidate') {
-            await peerConnection.addIceCandidate(new RTCIceCandidate(signal.candidate));
-        }
-    } catch (error) {
-        console.error('Ошибка обработки сигнала:', error);
-    }
 });
 
-// 4. Обработка событий от сервера (для UI)
-socket.on('user-joined-voice', (userId) => {
-    voiceStatus.textContent = `Статус: В чате (${userId})`;
-});
-
-socket.on('user-left-voice', (userId) => {
-    voiceStatus.textContent = `Статус: В чате (тихо)`;
-});
-
-// --- НАЗНАЧАЕМ ОБРАБОТЧИКИ КНОПОК ---
-joinVoiceBtn.addEventListener('click', () => {
-    const roomId = prompt('Введите ID комнаты (или оставьте пустым для создания новой):');
-    if (roomId === null) return; // пользователь отменил
-    const finalRoomId = roomId.trim() || `room-${Date.now()}`;
-    joinVoiceRoom(finalRoomId);
-});
-
-leaveVoiceBtn.addEventListener('click', leaveVoiceRoom);
-// Запуск сервера
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`
-    ═══════════════════════════════════════
-    🚀 Pанхол Мессенджер запущен!
-    📡 Сервер: http://localhost:${PORT}
-    💬 WebSocket: ws://localhost:${PORT}
-    ═══════════════════════════════════════
-    
-    💡 Для доступа с других устройств в локальной сети:
-       http://[ВАШ_IP]:${PORT}
-    
-    💡 Чтобы узнать ваш IP, введите в терминале:
-       • Windows: ipconfig
-       • Mac/Linux: ifconfig
-    `);
+    console.log(`Server running at http://localhost:${PORT}`);
 });
