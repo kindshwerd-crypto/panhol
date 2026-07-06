@@ -21,7 +21,38 @@ const clients = new Map(); // key: ws, value: { username, id }
 function generateId() {
     return Date.now() + '-' + Math.random().toString(36).substr(2, 9);
 }
+// --- ГОЛОСОВОЙ ЧАТ (WebRTC) ---
+// Хранилище комнат: { roomId: [socketId, socketId, ...] }
+const rooms = {};
 
+// 1. Присоединиться к голосовой комнате
+socket.on('join-voice-room', (roomId) => {
+    if (!rooms[roomId]) rooms[roomId] = [];
+    if (!rooms[roomId].includes(socket.id)) {
+        rooms[roomId].push(socket.id);
+    }
+    socket.join(roomId);
+    // Уведомляем всех в комнате, что пришёл новый пользователь
+    io.to(roomId).emit('user-joined-voice', socket.id);
+    console.log(`User ${socket.id} joined voice room: ${roomId}`);
+});
+
+// 2. Покинуть голосовую комнату
+socket.on('leave-voice-room', (roomId) => {
+    if (rooms[roomId]) {
+        rooms[roomId] = rooms[roomId].filter(id => id !== socket.id);
+        if (rooms[roomId].length === 0) delete rooms[roomId];
+    }
+    socket.leave(roomId);
+    io.to(roomId).emit('user-left-voice', socket.id);
+    console.log(`User ${socket.id} left voice room: ${roomId}`);
+});
+
+// 3. Пересылка сигналов WebRTC (offer, answer, ICE-candidate)
+socket.on('voice-signal', ({ to, signal }) => {
+    // 'to' — это socket.id получателя
+    io.to(to).emit('voice-signal', { from: socket.id, signal });
+});
 // Подсчёт онлайн пользователей
 function getOnlineCount() {
     let count = 0;
