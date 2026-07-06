@@ -484,7 +484,12 @@
         
         scrollToBottom();
     }
-
+    <!-- Панель голосового чата -->
+<div id="voice-controls" style="padding: 8px 16px; display: flex; gap: 10px; align-items: center; background: #f8fafd; border-top: 1px solid #e2e8f0; flex-wrap: wrap;">
+    <button id="joinVoiceBtn" class="action-btn" style="background: #1e3a8a; color: white; padding: 10px 16px; border: none; border-radius: 40px; cursor: pointer;">🎤 Войти в голосовой чат</button>
+    <button id="leaveVoiceBtn" class="action-btn" style="display: none; background: #dc2626; color: white; padding: 10px 16px; border: none; border-radius: 40px; cursor: pointer;">⏹ Выйти из чата</button>
+    <span id="voiceStatus" style="font-size: 0.9rem; color: #4a5568;">Статус: Не в сети</span>
+</div>
     // --- Отправка сообщения на сервер ---
     function sendMessageToServer(text) {
         if (!ws || ws.readyState !== WebSocket.OPEN) {
