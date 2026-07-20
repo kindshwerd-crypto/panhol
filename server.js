@@ -9,47 +9,41 @@ const io = new Server(server);
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Хранилище сообщений (в памяти сервера)
-let messages = [];
+// Хранилище сообщений для каждой комнаты
+const roomMessages = {
+    'global': [] // Глобальный чат
+};
 const MAX_MESSAGES = 200;
-
-// Хранилище подключённых пользователей
 const clients = new Map();
 
-// Генерация уникального ID
+// --- Голосовой чат (WebRTC) ---
+const rooms = {};
+
 function generateId() {
     return Date.now() + '-' + Math.random().toString(36).substr(2, 9);
 }
 
-// --- ГОЛОСОВОЙ ЧАТ (WebRTC) ---
-const rooms = {};
-
-// Подсчёт онлайн пользователей
 function getOnlineCount() {
     let count = 0;
-    // В Socket.IO используем io.sockets.sockets
     io.sockets.sockets.forEach(() => count++);
     return count;
 }
 
-// Отправка сообщения всем клиентам
-function broadcast(data, excludeClient = null) {
-    io.emit('new_message', data);
-}
-
-// Отправка истории новому пользователю
-function sendHistory(client) {
-    client.emit('history', { messages });
-}
-
-// Отправка количества онлайн всем
 function broadcastOnlineCount() {
-    const count = getOnlineCount();
-    io.emit('online_count', { count });
+    io.emit('online_count', { count: getOnlineCount() });
 }
 
-// Добавление нового сообщения в историю
-function addMessage(username, text, isSystem = false) {
+// Функция для получения или создания хранилища сообщений для комнаты
+function getRoomMessages(roomId) {
+    if (!roomMessages[roomId]) {
+        roomMessages[roomId] = [];
+    }
+    return roomMessages[roomId];
+}
+
+// Добавление сообщения в комнату
+function addMessageToRoom(roomId, username, text, isSystem = false) {
+    const messages = getRoomMessages(roomId);
     const message = {
         id: generateId(),
         username: username,
@@ -59,20 +53,43 @@ function addMessage(username, text, isSystem = false) {
     };
     messages.push(message);
     if (messages.length > MAX_MESSAGES) {
-        messages = messages.slice(-MAX_MESSAGES);
+        messages.splice(0, messages.length - MAX_MESSAGES);
     }
-    broadcast({ type: 'new_message', message });
+    // Отправляем сообщение только в эту комнату
+    io.to(roomId).emit('new_message', { roomId, message });
     return message;
 }
 
-// Обработка Socket.IO соединений
 io.on('connection', (socket) => {
     console.log('New client connected:', socket.id);
+    let currentRoom = 'global'; // По умолчанию в глобальном чате
 
-    // Отправляем историю
-    sendHistory(socket);
+    // Отправляем историю глобального чата
+    socket.emit('history', { roomId: 'global', messages: roomMessages['global'] || [] });
 
-    // --- ГОЛОСОВОЙ ЧАТ ---
+    // Подписка на комнату
+    socket.on('join_room', ({ roomId }) => {
+        // Выходим из предыдущей комнаты
+        if (currentRoom) {
+            socket.leave(currentRoom);
+        }
+        // Входим в новую комнату
+        currentRoom = roomId;
+        socket.join(roomId);
+        // Отправляем историю этой комнаты
+        const messages = getRoomMessages(roomId);
+        socket.emit('history', { roomId, messages });
+        console.log(`User ${socket.id} joined room: ${roomId}`);
+    });
+
+    // Отправка сообщения
+    socket.on('send_message', ({ roomId, username, text }) => {
+        if (text && text.trim()) {
+            addMessageToRoom(roomId, username || 'Аноним', text.trim(), false);
+        }
+    });
+
+    // --- ГОЛОСОВОЙ ЧАТ (без изменений) ---
     socket.on('join-voice-room', (roomId) => {
         if (!rooms[roomId]) rooms[roomId] = [];
         if (!rooms[roomId].includes(socket.id)) {
@@ -97,17 +114,8 @@ io.on('connection', (socket) => {
         io.to(to).emit('voice-signal', { from: socket.id, signal });
     });
 
-    // --- Обычные сообщения ---
-    socket.on('send_message', (data) => {
-        const { username, text } = data;
-        if (text && text.trim()) {
-            addMessage(username || 'Аноним', text.trim(), false);
-        }
-    });
-
     socket.on('disconnect', () => {
         console.log('Client disconnected:', socket.id);
-        // Удаляем из всех голосовых комнат
         for (const roomId in rooms) {
             rooms[roomId] = rooms[roomId].filter(id => id !== socket.id);
             if (rooms[roomId].length === 0) delete rooms[roomId];
