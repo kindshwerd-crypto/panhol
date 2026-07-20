@@ -3,9 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Panhol — голосовой чат</title>
+    <title>Panhol — чат с группами</title>
     <script src="/socket.io/socket.io.js"></script>
     <style>
+        /* ... (стили остаются без изменений) ... */
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
@@ -67,6 +68,45 @@
         .online-count {
             font-size: 0.8rem;
             color: #94a3b8;
+        }
+        .room-controls {
+            display: flex;
+            gap: 10px;
+            padding: 8px 24px;
+            background: #0f172a;
+            border-bottom: 1px solid #334155;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .room-controls button {
+            background: #334155;
+            border: none;
+            border-radius: 20px;
+            padding: 6px 16px;
+            color: white;
+            font-weight: 500;
+            cursor: pointer;
+            transition: 0.2s;
+            font-size: 0.9rem;
+        }
+        .room-controls button.active {
+            background: #8b5cf6;
+        }
+        .room-controls button:hover {
+            background: #475569;
+        }
+        .room-controls input {
+            background: #1e293b;
+            border: 1px solid #334155;
+            color: #f1f5f9;
+            padding: 6px 14px;
+            border-radius: 24px;
+            font-size: 0.9rem;
+            outline: none;
+            width: 150px;
+        }
+        .room-controls input:focus {
+            border-color: #8b5cf6;
         }
         .messages {
             flex: 1;
@@ -200,6 +240,8 @@
             .header { flex-direction: column; align-items: stretch; }
             .user-area { flex-wrap: wrap; }
             .user-area input { width: 100%; }
+            .room-controls { flex-direction: column; align-items: stretch; }
+            .room-controls input { width: 100%; }
             .messages { padding: 12px; }
             .input-area { flex-wrap: wrap; }
             .input-area input[type="text"] { min-width: 100%; }
@@ -217,13 +259,25 @@
             <span class="online-count" id="onlineCount">👥 0</span>
         </div>
     </div>
+
+    <!-- Панель управления комнатами -->
+    <div class="room-controls">
+        <button id="globalBtn" class="active">🌍 Глобальный чат</button>
+        <button id="groupBtn">👥 Группа</button>
+        <input type="text" id="groupNameInput" placeholder="Название группы" value="mygroup">
+        <button id="joinGroupBtn">Войти</button>
+        <span style="color:#94a3b8;font-size:0.8rem;margin-left:auto;" id="currentRoomDisplay">Текущий: Глобальный</span>
+    </div>
+
     <div class="messages" id="messagesContainer">
         <div class="message system">💬 Добро пожаловать в Panhol!</div>
     </div>
+
     <div class="input-area">
         <input type="text" id="messageInput" placeholder="Введите сообщение...">
         <button id="sendBtn">Отправить</button>
     </div>
+
     <div class="voice-controls">
         <button id="joinVoiceBtn">🎤 Войти в голосовой чат</button>
         <button id="leaveVoiceBtn" class="leave-btn">⏹ Выйти из чата</button>
@@ -240,6 +294,51 @@
     const messageInput = document.getElementById('messageInput');
     const sendBtn = document.getElementById('sendBtn');
     const onlineCount = document.getElementById('onlineCount');
+
+    // --- Управление комнатами ---
+    let currentRoom = 'global';
+    const globalBtn = document.getElementById('globalBtn');
+    const groupBtn = document.getElementById('groupBtn');
+    const groupNameInput = document.getElementById('groupNameInput');
+    const joinGroupBtn = document.getElementById('joinGroupBtn');
+    const currentRoomDisplay = document.getElementById('currentRoomDisplay');
+
+    function switchRoom(roomId) {
+        if (currentRoom === roomId) return;
+        currentRoom = roomId;
+        socket.emit('join_room', { roomId });
+        // Обновляем активную кнопку
+        globalBtn.classList.toggle('active', roomId === 'global');
+        groupBtn.classList.toggle('active', roomId !== 'global');
+        // Очищаем сообщения (история загрузится заново)
+        messagesContainer.innerHTML = '';
+        // Обновляем отображение
+        if (roomId === 'global') {
+            currentRoomDisplay.textContent = 'Текущий: Глобальный';
+        } else {
+            currentRoomDisplay.textContent = `Текущий: Группа "${roomId}"`;
+        }
+    }
+
+    globalBtn.addEventListener('click', () => {
+        switchRoom('global');
+    });
+
+    joinGroupBtn.addEventListener('click', () => {
+        const groupName = groupNameInput.value.trim();
+        if (groupName) {
+            switchRoom(groupName);
+        } else {
+            alert('Введите название группы');
+        }
+    });
+
+    // Обработка Enter в поле названия группы
+    groupNameInput.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+            joinGroupBtn.click();
+        }
+    });
 
     // --- Сообщения ---
     function addMessageToChat(msg, isOwn = false, isSystem = false) {
@@ -278,7 +377,7 @@
         const text = messageInput.value.trim();
         if (!text) return;
         const currentUsername = document.getElementById('usernameInput').value.trim() || 'Гость';
-        socket.emit('send_message', { username: currentUsername, text });
+        socket.emit('send_message', { roomId: currentRoom, username: currentUsername, text });
         messageInput.value = '';
         messageInput.focus();
     }
@@ -288,22 +387,25 @@
         if (e.key === 'Enter') sendMessage();
     });
 
-    // Сохраняем имя при изменении
     document.getElementById('usernameInput').addEventListener('change', function() {
         localStorage.setItem('panhol_username', this.value.trim() || 'Гость');
     });
 
     // --- События с сервера ---
     socket.on('history', (data) => {
-        messagesContainer.innerHTML = '';
-        data.messages.forEach(msg => {
-            const isOwn = (msg.username === document.getElementById('usernameInput').value.trim());
-            addMessageToChat(msg, isOwn, msg.isSystem);
-        });
+        // Проверяем, что история пришла для текущей комнаты
+        if (data.roomId === currentRoom) {
+            messagesContainer.innerHTML = '';
+            data.messages.forEach(msg => {
+                const isOwn = (msg.username === document.getElementById('usernameInput').value.trim());
+                addMessageToChat(msg, isOwn, msg.isSystem);
+            });
+        }
     });
 
     socket.on('new_message', (data) => {
-        if (data.type === 'new_message' && data.message) {
+        // Показываем сообщение только если оно для текущей комнаты
+        if (data.roomId === currentRoom) {
             const msg = data.message;
             const currentUsername = document.getElementById('usernameInput').value.trim();
             const isOwn = (msg.username === currentUsername);
@@ -315,7 +417,7 @@
         onlineCount.textContent = `👥 ${data.count}`;
     });
 
-    // --- Голосовой чат (WebRTC) ---
+    // --- Голосовой чат (без изменений) ---
     const remoteAudio = document.createElement('audio');
     remoteAudio.autoplay = true;
     let localStream = null;
@@ -434,10 +536,10 @@
 
     leaveVoiceBtn.addEventListener('click', leaveVoiceRoom);
 
-    // Сохраняем имя при старте
+    // --- Инициализация ---
+    // При загрузке подключаемся к глобальному чату
     socket.on('connect', () => {
-        // Можно отправить имя при подключении, но сервер не требует этого
-        console.log('Connected to server');
+        switchRoom('global');
     });
 </script>
 </body>
